@@ -1,9 +1,17 @@
 (ns app.core
   (:require
     [cljs.spec.alpha :as s]
-    [clojure.edn :as edn]
+    ["@instantdb/react" :as instantdb]
     [uix.core :as uix :refer [defui $]]
     [uix.dom]))
+
+(def init-db instantdb/init)
+(def tx instantdb/tx)
+(def id instantdb/id)
+
+(def app-id "your-instant-db-id")
+
+(def db (delay (init-db #js {:appId app-id})))
 
 (defui header []
   ($ :header.app-header
@@ -26,8 +34,8 @@
        :on-key-down (fn [^js e]
                       (when (= "Enter" (.-key e))
                         (set-value! "")
-                        (on-add-todo #(assoc % (js/Date.now) {:text value
-                                                              :status :unresolved}))))})))
+                        (on-add-todo {:text value
+                                      :status "unresolved"})))})))
 
 (defui editable-text [{:keys [text text-style on-done-editing]}]
   (let [[editing? set-editing!] (uix/use-state false)
@@ -51,59 +59,56 @@
         text))))
 
 (s/def :todo/text string?)
-(s/def :todo/status #{:unresolved :resolved})
+(s/def :todo/status #{"resolved" "unresolved"})
 
 (s/def :todo/item
   (s/keys :req-un [:todo/text :todo/status]))
 
 (defui todo-item
-  [{:keys [created-at text status on-update-todos] :as props}]
+  [{:keys [id text status on-update-todo on-delete-todo] :as props}]
   {:pre [(s/valid? :todo/item props)]}
   ($ :.todo-item
-    {:key created-at}
+    {:key id}
     ($ :input.todo-item-control
       {:type :checkbox
-       :checked (= status :resolved)
+       :checked (= status "resolved")
        :on-change (fn [_]
-                    (on-update-todos #(update-in % [created-at :status] {:unresolved :resolved
-                                                                         :resolved :unresolved})))})
+                    (on-update-todo (update props :status {"unresolved" "resolved"
+                                                          "resolved" "unresolved"})
+                                    id))})
     ($ editable-text
       {:text text
        :text-style {:text-decoration (when (= :resolved status) :line-through)}
        :on-done-editing (fn [value]
-                          (on-update-todos #(assoc-in % [created-at :text] value)))})
+                          (on-update-todo (assoc props :text value) id))})
     ($ :button.todo-item-delete-button
       {:on-click (fn [_]
-                   (on-update-todos #(dissoc % created-at)))}
+                   (on-delete-todo id))}
       "×")))
 
-(defn use-persistent-state
-  "Loads initial state from local storage and persists every updated state value
-  Returns a tuple of the current state value and an updater function"
-  [store-key initial-value]
-  (let [[value set-value!] (uix/use-state initial-value)]
-    (uix/use-effect
-      (fn []
-        (let [value (edn/read-string (js/localStorage.getItem store-key))]
-          (set-value! #(into % value))))
-      [store-key])
-    (uix/use-effect
-      (fn []
-        (js/localStorage.setItem store-key (str value)))
-      [value store-key])
-    [value set-value!]))
+(defn update-todo!
+  ([todo] (update-todo! todo nil))
+  ([todo instant-id]
+   (.transact @db
+              (.update (aget (.-todos tx) (or instant-id (id)))
+                       (clj->js (select-keys todo [:id :text :status]))))))
 
+(defn delete-todo!
+  [instant-id]
+  (.transact @db
+             (.delete (aget (.-todos tx) instant-id))))
 
 (defui app []
-  (let [[todos set-todos!] (use-persistent-state "uix-starter/todos" (sorted-map-by >))]
+  (let [{:keys [data]} (js->clj (.useQuery @db (clj->js {:todos {}}))
+                                :keywordize-keys true)]
     ($ :.app
       ($ header)
-      ($ text-field {:on-add-todo set-todos!})
-      (for [[created-at todo] todos]
+      ($ text-field {:on-add-todo update-todo!})
+      (for [todo (:todos data)]
         ($ todo-item
-          (assoc todo :created-at created-at
-                      :key created-at
-                      :on-update-todos set-todos!)))
+          (assoc todo :key (:id todo)
+                      :on-update-todo update-todo!
+                      :on-delete-todo delete-todo!)))
       ($ footer))))
 
 (defonce root
